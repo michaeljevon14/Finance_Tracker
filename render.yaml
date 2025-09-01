@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: line-finance-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    autoDeploy: true
+    envVars:
+    - key: LINE_CHANNEL_SECRET
+      sync: false
+    - key: LINE_CHANNEL_ACCESS_TOKEN
+      sync: false
+    - key: SHEET_ID
+      sync: false
+    - key: GOOGLE_SERVICE_ACCOUNT_JSON
+      sync: false
+    - key: OWNER_USER_ID
+      sync: false
+    - key: TIMEZONE
+      value: Asia/Taipei
+
+  - type: cron
+    name: monthly-summary
+    env: python
+    schedule: "0 1 1 * *" # At 09:00 Asia/Taipei if your instance is UTC+8 (Render runs UTC; adjust as needed)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python cron.py
+    plan: free

@@ -1,4 +1,5 @@
-import os, json
+import os
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,27 +17,41 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-# --- ENV ---
-CHANNEL_SECRET = os.environ["35d8dd5e5f85f83c8affaa8c4c2d0255"]
-CHANNEL_ACCESS_TOKEN = os.environ["2vI5tmzqCizDxrKAQZPRYGk0it6J8Oq82V/MC/8qPxEhE9t55EvtchRK9Sq6zeYIdQD0ydI2eQ8V0jY0wdynHbyE4qWaEy5J/ODOvtBBryetOQBVWqd4uCC1R84ZEB3i0rDTUgqSGC3xfm/ubi9ePgdB04t89/1O/w1cDnyilFU="]
-SHEET_NAME = os.environ.get("Michael Jevon Finance Tracker", "Finance Tracker")
+# ----- ENV VARS (must match names you set on Render) -----
+CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
+CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
+SHEET_NAME = os.environ.get("SHEET_NAME", "Finance Tracker")
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
-# Google credentials: paste raw JSON into env GOOGLE_CREDENTIALS_JSON
-creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+missing = []
+if not CHANNEL_SECRET:
+    missing.append("CHANNEL_SECRET")
+if not CHANNEL_ACCESS_TOKEN:
+    missing.append("CHANNEL_ACCESS_TOKEN")
+if not GOOGLE_CREDENTIALS_JSON:
+    missing.append("GOOGLE_CREDENTIALS_JSON")
+
+if missing:
+    raise RuntimeError("Missing environment variables: " + ", ".join(missing) +
+                       ". Set them in Render: Service → Environment → Add Environment Variable.")
+
+# Parse Google credentials JSON (must be the full JSON string)
+try:
+    creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+except Exception as e:
+    raise RuntimeError("GOOGLE_CREDENTIALS_JSON is not valid JSON: " + str(e))
+
 scopes = ["https://www.googleapis.com/auth/spreadsheets",
           "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
 
+# Authorize gspread with credentials
 gc = gspread.authorize(creds)
 sheet = gc.open(SHEET_NAME).sheet1  # first worksheet
 
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# Simple health check (GET)
-@app.get("/")
-def health():
-    return "ok"
 
 # LINE webhook (POST)
 @app.post("/callback")

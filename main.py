@@ -17,7 +17,7 @@ from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
-# ----- ENV VARS (must match names you set on Render) -----
+# ----- ENV VARS -----
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
 SHEET_NAME = os.environ.get("SHEET_NAME", "Finance Tracker")
@@ -53,6 +53,15 @@ transactions_sheet = spreadsheet.worksheet("Transactions")
 budgets_sheet = spreadsheet.worksheet("Budgets")
 categories_sheet = spreadsheet.worksheet("Categories")
 
+# Ensure Balances sheet exists
+try:
+    balances_sheet = spreadsheet.worksheet("Balances")
+except gspread.exceptions.WorksheetNotFound:
+    balances_sheet = spreadsheet.add_worksheet(title="Balances", rows="10", cols="2")
+    balances_sheet.update("A1:B1", [["Place", "Balance"]])
+    for p in ["Cash", "Post", "Cathay"]:
+        balances_sheet.append_row([p, 0])
+
 # LINE API
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
@@ -61,28 +70,42 @@ handler = WebhookHandler(CHANNEL_SECRET)
 def get_categories():
     return [row[0] for row in categories_sheet.get_all_values()[1:]]  # skip header
 
-# ===== Balance Report =====
+# ===== Balances =====
 def get_balance():
-    records = transactions_sheet.get_all_records()
-    balances = {"cash": 0, "post": 0, "cathay": 0}
-    for row in records:
-        amount = row["Amount"]
-        place = row["Place"].lower()
-        if place in balances:
-            if row["Type"].lower().startswith("i"):
-                balances[place] += amount
-            else:
-                balances[place] -= amount
+    """Read balances directly from the Balances sheet."""
+    records = balances_sheet.get_all_values()[1:]  # skip header
+    balances = {row[0].lower(): int(row[1]) for row in records}
     return balances
 
 def format_balance_report(balances):
     return (
         "📊 Current Balances:\n"
-        f"- Cash: {balances['cash']} TWD\n"
-        f"- Post Bank: {balances['post']} TWD\n"
-        f"- Cathay Bank: {balances['cathay']} TWD\n"
+        f"- Cash: {balances.get('cash',0)} TWD\n"
+        f"- Post Bank: {balances.get('post',0)} TWD\n"
+        f"- Cathay Bank: {balances.get('cathay',0)} TWD\n"
         f"💰 Total: {sum(balances.values())} TWD"
     )
+
+def update_balances(place, amount, type_):
+    # Read current balances
+    records = balances_sheet.get_all_values()[1:]  # skip header
+    balances = {row[0].lower(): int(row[1]) for row in records}
+
+    place_key = place.lower()
+    if place_key not in balances:
+        balances[place_key] = 0  # Add new place automatically
+
+    # Update balance
+    if type_.lower().startswith("i"):
+        balances[place_key] += amount
+    else:
+        balances[place_key] -= amount
+
+    # Clear and rewrite balances sheet
+    balances_sheet.clear()
+    balances_sheet.update("A1:B1", [["Place", "Balance"]])
+    rows = [[p.capitalize(), b] for p, b in balances.items()]
+    balances_sheet.update("A2", rows)
 
 # ===== Monthly Report =====
 def get_monthly_report(year, month):
@@ -189,12 +212,15 @@ def handle_message(event: MessageEvent):
         date_str = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
         transactions_sheet.append_row([date_str, type_, amount, category, place, note])
 
+        # Update balances automatically
+        update_balances(place, amount, type_)
+
         reply = f"✅ NT${amount:,} {type_} ({category}) {('from' if type_=='Expense' else 'to')} {place} saved."
         return reply_text(event.reply_token, reply)
 
     # Balance
     if text.lower() == "balance":
-        balances = get_balance()
+        balances = get_balance()  # now reads directly from Balances sheet
         return reply_text(event.reply_token, format_balance_report(balances))
 
     # Monthly report

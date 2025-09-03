@@ -230,6 +230,10 @@ def reply_text(reply_token: str, message: str):
             )
         )
 
+@app.get("/health")
+def health():
+    return "OK"
+
 if __name__ == "__main__":
     # Local dev only; Render will run via gunicorn
     app.run(host="0.0.0.0", port=5000)

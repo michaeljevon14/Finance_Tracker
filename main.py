@@ -1,147 +1,244 @@
+import os
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.v3 import WebhookHandler
+from linebot.v3.messaging import (
+    MessagingApi, Configuration, ApiClient,
+    ReplyMessageRequest, TextMessage
+)
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
+
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
-LINE_CHANNEL_ACCESS_TOKEN = "YOUR_LINE_CHANNEL_ACCESS_TOKEN"
-LINE_CHANNEL_SECRET = "YOUR_LINE_CHANNEL_SECRET"
-SHEET_NAME = "Finance Tracker"
-SERVICE_ACCOUNT_FILE = "service_account.json"
-
-# Flask app
 app = Flask(__name__)
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Google Sheets auth
-scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-credentials = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-gc = gspread.authorize(credentials)
+# ----- ENV VARS (must match names you set on Render) -----
+CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
+CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
+SHEET_NAME = os.environ.get("SHEET_NAME", "Finance Tracker")
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
-# Open sheets
+missing = []
+if not CHANNEL_SECRET:
+    missing.append("CHANNEL_SECRET")
+if not CHANNEL_ACCESS_TOKEN:
+    missing.append("CHANNEL_ACCESS_TOKEN")
+if not GOOGLE_CREDENTIALS_JSON:
+    missing.append("GOOGLE_CREDENTIALS_JSON")
+
+if missing:
+    raise RuntimeError("Missing environment variables: " + ", ".join(missing))
+
+# Parse Google credentials JSON
+try:
+    creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+except Exception as e:
+    raise RuntimeError("GOOGLE_CREDENTIALS_JSON is not valid JSON: " + str(e))
+
+scopes = ["https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+
+# Authorize gspread
+gc = gspread.authorize(creds)
 spreadsheet = gc.open(SHEET_NAME)
+
+# Worksheets
 transactions_sheet = spreadsheet.worksheet("Transactions")
 budgets_sheet = spreadsheet.worksheet("Budgets")
 categories_sheet = spreadsheet.worksheet("Categories")
 
-# -----------------------------
-# HELPER FUNCTIONS
-# -----------------------------
+# LINE API
+configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(CHANNEL_SECRET)
+
+# ===== Categories =====
 def get_categories():
-    """Return a list of valid categories."""
     return [row[0] for row in categories_sheet.get_all_values()[1:]]  # skip header
 
+# ===== Balance Report =====
+def get_balance():
+    records = transactions_sheet.get_all_records()
+    balances = {"cash": 0, "post": 0, "cathay": 0}
+    for row in records:
+        amount = row["Amount"]
+        place = row["Place"].lower()
+        if place in balances:
+            if row["Type"].lower().startswith("i"):
+                balances[place] += amount
+            else:
+                balances[place] -= amount
+    return balances
+
+def format_balance_report(balances):
+    return (
+        "📊 Current Balances:\n"
+        f"- Cash: {balances['cash']} TWD\n"
+        f"- Post Bank: {balances['post']} TWD\n"
+        f"- Cathay Bank: {balances['cathay']} TWD\n"
+        f"💰 Total: {sum(balances.values())} TWD"
+    )
+
+# ===== Monthly Report =====
+def get_monthly_report(year, month):
+    records = transactions_sheet.get_all_records()
+    income, expense = 0, 0
+    categories = {}
+
+    for row in records:
+        row_date = datetime.strptime(row["Date"], "%Y-%m-%d %H:%M:%S")
+        if row_date.year == year and row_date.month == month:
+            amount = row["Amount"]
+            category = row["Category"]
+            if row["Type"].lower().startswith("i"):
+                income += amount
+            else:
+                expense += amount
+                categories[category] = categories.get(category, 0) + amount
+
+    net = income - expense
+    top_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:3]
+
+    report = (
+        f"📅 Report for {year}-{month:02d}\n"
+        f"Income: {income} TWD\n"
+        f"Expenses: {expense} TWD\n"
+        f"Net Savings: {net} TWD\n\n"
+        "Top Categories:\n"
+    )
+    for cat, amt in top_cats:
+        report += f"- {cat}: {amt} TWD\n"
+    return report
+
+# ===== Budgeting =====
 def get_budgets():
-    """Return budgets as a dict {category: amount}."""
     try:
-        values = budgets_sheet.get_all_values()[1:]  # skip header
-        return {row[0]: float(row[1]) for row in values}
-    except Exception:
-        return {}
+        budget_sheet = spreadsheet.worksheet("Budgets")
+    except gspread.exceptions.WorksheetNotFound:
+        budget_sheet = spreadsheet.add_worksheet(title="Budgets", rows="100", cols="2")
+        budget_sheet.update("A1:B1", [["Category", "Amount"]])
+    records = budget_sheet.get_all_records()
+    return {row["Category"].lower(): row["Amount"] for row in records}
 
 def set_budget(category, amount):
-    """Set or update a budget for a category."""
-    categories = get_categories()
-    if category not in categories:
-        return f"Category '{category}' does not exist."
-
     budgets = get_budgets()
-    cell = None
-    try:
-        cell = budgets_sheet.find(category)
-    except gspread.exceptions.CellNotFound:
-        pass
+    budgets[category.lower()] = amount
+    budget_sheet = spreadsheet.worksheet("Budgets")
+    budget_sheet.clear()
+    budget_sheet.update("A1:B1", [["Category", "Amount"]])
+    rows = [[cat, amt] for cat, amt in budgets.items()]
+    budget_sheet.update("A2", rows)
 
-    if cell:
-        budgets_sheet.update_cell(cell.row, 2, amount)
-    else:
-        budgets_sheet.append_row([category, amount])
-
-    return f"Budget for '{category}' set to {amount}."
-
-def log_transaction(category, amount, t_type, notes=""):
-    """Log a transaction in Transactions sheet."""
-    today = datetime.today().strftime("%Y-%m-%d")
-    transactions_sheet.append_row([today, category, amount, t_type, notes])
-    return f"Logged {t_type} of {amount} for '{category}'."
-
-def get_budget_status(year=None, month=None):
-    """Return a simple budget vs expense summary for current month."""
-    if year is None or month is None:
-        today = datetime.today()
-        year, month = today.year, today.month
-
+def get_budget_status(year, month):
     budgets = get_budgets()
-    transactions = transactions_sheet.get_all_values()[1:]  # skip header
+    records = transactions_sheet.get_all_records()
+    spent = {}
 
-    expenses = {}
-    for row in transactions:
-        date_str, category, amount, t_type, *_ = row
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-        if date_obj.year == year and date_obj.month == month and t_type.lower() == "expense":
-            expenses[category] = expenses.get(category, 0) + float(amount)
+    for row in records:
+        row_date = datetime.strptime(row["Date"], "%Y-%m-%d %H:%M:%S")
+        if row_date.year == year and row_date.month == month:
+            if row["Type"].lower().startswith("e"):
+                cat = row["Category"].lower()
+                spent[cat] = spent.get(cat, 0) + row["Amount"]
 
-    # Build status message
-    lines = [f"Budget status for {month}/{year}:"]
-    for cat, budget in budgets.items():
-        spent = expenses.get(cat, 0)
-        lines.append(f"- {cat}: {spent}/{budget}")
+    report = f"🎯 Budget Status ({year}-{month:02d})\n"
+    for cat, limit in budgets.items():
+        used = spent.get(cat, 0)
+        pct = int((used / limit) * 100) if limit > 0 else 0
+        report += f"- {cat.capitalize()}: {used} / {limit} TWD ({pct}%)\n"
+    return report
 
-    return "\n".join(lines)
-
-# -----------------------------
-# LINE BOT CALLBACK
-# -----------------------------
-@app.route("/callback", methods=["POST"])
+# ===== LINE webhook =====
+@app.post("/callback")
 def callback():
-    signature = request.headers.get("X-Line-Signature")
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
-    except Exception as e:
-        print("Error handling message:", e)
-        abort(500)
+    except InvalidSignatureError:
+        print("❌ Invalid signature. Check CHANNEL_SECRET.")
+        abort(400)
     return "OK"
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    text = event.message.text.strip()
-    reply = "Sorry, I didn't understand."
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event: MessageEvent):
+    text = (event.message.text or "").strip()
+    parts = text.split()
+    if not parts:
+        return
 
-    # Command: Set budget -> "budget Food 500"
-    if text.lower().startswith("budget"):
+    # Add transaction
+    if parts[0].lower() in ("e", "i"):
+        type_ = "Expense" if parts[0].lower() == "e" else "Income"
         try:
-            _, category, amount = text.split()
-            reply = set_budget(category, float(amount))
+            amount = int(parts[1])
         except Exception:
-            reply = "Usage: budget <Category> <Amount>"
+            return reply_text(event.reply_token,
+                "Format: e/i amount category place note(optional)\nex: e 500 food cash lunch")
 
-    # Command: Log expense -> "expense Food 100"
-    elif text.lower().startswith("expense") or text.lower().startswith("income"):
-        try:
-            t_type, category, amount = text.split()
-            t_type = t_type.lower()
-            if category not in get_categories():
-                reply = f"Category '{category}' does not exist."
-            else:
-                reply = log_transaction(category, float(amount), t_type)
-        except Exception:
-            reply = "Usage: expense/income <Category> <Amount>"
+        category = parts[2] if len(parts) > 2 else "Other"
+        place = parts[3] if len(parts) > 3 else "Unknown"
+        note = " ".join(parts[4:]) if len(parts) > 4 else ""
 
-    # Command: Check budget status
-    elif text.lower() == "status":
-        reply = get_budget_status()
+        date_str = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+        transactions_sheet.append_row([date_str, type_, amount, category, place, note])
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        reply = f"✅ NT${amount:,} {type_} ({category}) {('from' if type_=='Expense' else 'to')} {place} saved."
+        return reply_text(event.reply_token, reply)
 
-# -----------------------------
-# RUN APP
-# -----------------------------
+    # Balance
+    if text.lower() == "balance":
+        balances = get_balance()
+        return reply_text(event.reply_token, format_balance_report(balances))
+
+    # Monthly report
+    elif text.lower().startswith("report"):
+        if len(parts) == 2:
+            try:
+                year, month = map(int, parts[1].split("-"))
+            except Exception:
+                today = datetime.today()
+                year, month = today.year, today.month
+        else:
+            today = datetime.today()
+            year, month = today.year, today.month
+        return reply_text(event.reply_token, get_monthly_report(year, month))
+
+    # Set budget
+    elif text.lower().startswith("setbudget"):
+        if len(parts) == 3:
+            category, amount = parts[1], int(parts[2])
+            set_budget(category, amount)
+            return reply_text(event.reply_token, f"✅ Budget set for {category}: {amount} TWD")
+
+    # View budget
+    elif text.lower() == "budget":
+        today = datetime.today()
+        return reply_text(event.reply_token, get_budget_status(today.year, today.month))
+
+    # Help
+    reply = "Format: e/i amount category place note(optional)\nex: e 500 food cash lunch | i 10000 salary cathay"
+    return reply_text(event.reply_token, reply)
+
+def reply_text(reply_token: str, message: str):
+    with ApiClient(configuration) as api_client:
+        api = MessagingApi(api_client)
+        api.reply_message(
+            ReplyMessageRequest(
+                replyToken=reply_token,
+                messages=[TextMessage(text=message)]
+            )
+        )
+
+@app.get("/health")
+def health():
+    return "OK"
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=5000)

@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 TIMEZONE = ZoneInfo("Asia/Taipei")
@@ -375,8 +375,7 @@ def handle_message(event: MessageEvent):
         period = parts[1].lower()
         transactions = transactions_sheet.get_all_records()
 
-        from datetime import datetime, timedelta
-        today = datetime.today()
+        today = datetime.now(TIMEZONE)
         
         if period == "daily":
             cutoff = today.replace(hour=0, minute=0, second=0, microsecond=0)

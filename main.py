@@ -122,11 +122,9 @@ def get_budget_status(year, month):
 
 # ===== Balances =====
 def get_balance():
+    # Only calculate balances based on transactions, ignore sheet values
     records = transactions_sheet.get_all_records()
-    balances_records = balances_sheet.get_all_values()[1:]
-    balances = {row[0].capitalize(): int(row[1]) for row in balances_records}
-
-    # Apply transactions dynamically
+    balances = {}
     for row in records:
         amount = row["Amount"]
         place = row["Place"].capitalize()
@@ -136,6 +134,12 @@ def get_balance():
             balances[place] += amount
         elif row["Type"].lower().startswith("e"):
             balances[place] -= amount
+    # Add places from balances_sheet if not present in transactions
+    balances_records = balances_sheet.get_all_values()[1:]
+    for row in balances_records:
+        place = row[0].capitalize()
+        if place not in balances:
+            balances[place] = int(row[1])
     return balances
 
 def update_balances(place, amount, type_):
@@ -391,11 +395,12 @@ def handle_message(event: MessageEvent):
         # old parsing (wrong order)
         # date, category, amount, type_, place = last_row[:5]
 
-        # ✅ fixed parsing
-        date, type_, amount, category, place, *note = last_row
+        # Parse last transaction
+        _, type_, amount, category, place, *_ = last_row
         amount = int(amount)
 
         # Rollback balances
+        balances = get_balance()  # Get current balance
         if type_.lower().startswith("i"):
             update_balances(place, -amount, "Income")
         elif type_.lower().startswith("e"):

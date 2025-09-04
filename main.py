@@ -53,6 +53,13 @@ spreadsheet = gc.open(SHEET_NAME)
 # Worksheets
 transactions_sheet = spreadsheet.worksheet("Transactions")
 
+# Ensure Transfers sheet exists
+try:
+    transfers_sheet = spreadsheet.worksheet("Transfers")
+except gspread.exceptions.WorksheetNotFound:
+    transfers_sheet = spreadsheet.add_worksheet(title="Transfers", rows="100", cols="4")
+    transfers_sheet.update("A1:D1", [["Date", "Amount", "From", "To"]])
+
 # Ensure Balances sheet exists
 try:
     balances_sheet = spreadsheet.worksheet("Balances")
@@ -206,6 +213,8 @@ def get_help_text():
         "- e <amount> <category> <place> [note]\n"
         "   ex: e 500 food cash lunch\n"
         "   ex: i 10000 salary cathay\n\n"
+        "📌 Transfer:\n"
+        "- transfer <amount> <from_place> <to_place> [note] → move money between balances\n\n"
         "📌 Balance:\n"
         "- balance → show all balances\n"
         "- setbalance <place> <amount> → set initial balance for a place\n\n"
@@ -221,7 +230,9 @@ def get_help_text():
         "- reset monthly → reset this month’s transactions\n"
         "- refresh → recalc balances & categories (budgets kept, setbalance preserved)\n\n"
         "📌 Help:\n"
-        "- help → show this message"
+        "- help → show this message\n\n"
+        "📌 Search:\n"
+        "- search <keyword> [YYYY-MM or YYYY-MM-DD] → find transactions"
     )
 
 # ===== LINE webhook =====
@@ -281,6 +292,42 @@ def handle_message(event: MessageEvent):
 
         reply = f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
         return reply_text(event.reply_token, reply)
+    
+    # ---- Transfer ----
+    elif parts[0].lower() == "transfer" and len(parts) >= 4:
+        try:
+            amount = int(parts[1])
+        except ValueError:
+            return reply_text(event.reply_token, "❌ Invalid amount. Example: transfer 500 cash post note(optional)")
+
+        from_place = parts[2].capitalize()
+        to_place = parts[3].capitalize()
+        note = " ".join(parts[4:]) if len(parts) > 4 else ""
+
+        # Get current balances
+        balances_records = balances_sheet.get_all_values()[1:]
+        balances = {row[0].capitalize(): int(row[1]) for row in balances_records}
+        if from_place not in balances:
+            return reply_text(event.reply_token, f"❌ {from_place} does not exist in balances.")
+        if balances[from_place] < amount:
+            return reply_text(event.reply_token, f"❌ Not enough funds in {from_place}. Available: {balances[from_place]} TWD")
+
+        # Update balances directly
+        balances[from_place] -= amount
+        balances[to_place] = balances.get(to_place, 0) + amount
+
+        balances_sheet.clear()
+        balances_sheet.update("A1:B1", [["Place", "Balance"]])
+        rows = [[p, b] for p, b in balances.items()]
+        balances_sheet.update("A2", rows)
+
+        # Record transfer in Transfers sheet
+        date_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+        transfers_sheet.append_row([date_str, amount, from_place, to_place])
+
+        reply = f"🔄 Transferred {amount} TWD from {from_place} to {to_place}."
+        return reply_text(event.reply_token, reply)
+
 
     # ---- Balance ----
     elif text.lower() == "balance":
@@ -457,6 +504,43 @@ def handle_message(event: MessageEvent):
     # ---- Help ----
     elif parts[0].lower() == "help":
         return reply_text(event.reply_token, get_help_text())
+    
+    # ---- Search transactions ----
+    elif parts[0].lower() == "search" and len(parts) >= 2:
+        keyword = parts[1].lower()
+        date_filter = None
+        if len(parts) >= 3:
+            date_filter = parts[2]  # format: YYYY-MM or YYYY-MM-DD
+
+        records = transactions_sheet.get_all_records()
+        results = []
+        for row in records:
+            row_date = datetime.strptime(row["Date"], "%Y-%m-%d %H:%M:%S")
+            match_keyword = (
+                keyword in str(row["Category"]).lower() or
+                keyword in str(row["Place"]).lower() or
+                keyword in str(row["Note"]).lower()
+            )
+
+            match_date = True
+            if date_filter:
+                if len(date_filter) == 7:  # YYYY-MM
+                    match_date = row_date.strftime("%Y-%m") == date_filter
+                elif len(date_filter) == 10:  # YYYY-MM-DD
+                    match_date = row_date.strftime("%Y-%m-%d") == date_filter
+
+            if match_keyword and match_date:
+                results.append(f"{row['Date']} | {row['Type']} {row['Amount']} | {row['Category']} | {row['Place']} | {row['Note']}")
+
+        if not results:
+            return reply_text(event.reply_token, f"🔍 No transactions found for '{keyword}'{f' on {date_filter}' if date_filter else ''}.")
+        
+        # Limit output to avoid LINE message length issues
+        max_results = 10
+        reply_msg = "🔍 Search Results:\n" + "\n".join(results[:max_results])
+        if len(results) > max_results:
+            reply_msg += f"\n...and {len(results) - max_results} more."
+        return reply_text(event.reply_token, reply_msg)
 
     # ---- Default ----
     return reply_text(event.reply_token, get_help_text())

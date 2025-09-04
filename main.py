@@ -433,17 +433,14 @@ def handle_message(event: MessageEvent):
         return reply_text(event.reply_token, help_text)
 
     # ---- Default ----
-    reply = (
-        "Format: e/i/income/expense amount category place note(optional)\n"
-        "Examples:\n"
-        "- e 500 food cash lunch\n"
-        "- i 10000 salary cathay\n"
-        "- income 10000 salary cathay\n"
-        "- expense 500 food cash lunch\n"
-        "- setbudget food 5000\n"
-        "- setbalance cash 2000"
-    )
-    return reply_text(event.reply_token, reply)
+    else:
+        reply = (
+            "Available commands:\n"
+            "e/i amount category place note(optional)\n"
+            "balance | report YYYY-MM | setbudget category amount | budget\n"
+            "setbalance place amount | delete last | reset daily/weekly/monthly | refresh"
+        )
+        return reply_text(event.reply_token, reply)
 
 def reply_text(reply_token: str, message: str):
     with ApiClient(configuration) as api_client:

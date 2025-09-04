@@ -72,19 +72,26 @@ def get_categories():
 
 # ===== Balances =====
 def get_balance():
-    """Read balances directly from the Balances sheet."""
-    records = balances_sheet.get_all_values()[1:]  # skip header
-    balances = {row[0].lower(): int(row[1]) for row in records}
+    records = transactions_sheet.get_all_records()
+    balances = {}
+    for row in records:
+        amount = row["Amount"]
+        place = row["Place"].lower()
+        if place not in balances:
+            balances[place] = 0
+        if row["Type"].lower().startswith("i"):
+            balances[place] += amount
+        else:
+            balances[place] -= amount
     return balances
 
 def format_balance_report(balances):
-    return (
-        "📊 Current Balances:\n"
-        f"- Cash: {balances.get('cash',0)} TWD\n"
-        f"- Post Bank: {balances.get('post',0)} TWD\n"
-        f"- Cathay Bank: {balances.get('cathay',0)} TWD\n"
-        f"💰 Total: {sum(balances.values())} TWD"
-    )
+    total = sum(balances.values())
+    report = "📊 Current Balances:\n"
+    for place, bal in balances.items():
+        report += f"- {place.capitalize()}: {bal} TWD\n"
+    report += f"💰 Total: {total} TWD"
+    return report
 
 def update_balances(place, amount, type_):
     # Read current balances

@@ -222,6 +222,36 @@ def handle_message(event: MessageEvent):
     if text.lower() == "balance":
         balances = get_balance()  # now reads directly from Balances sheet
         return reply_text(event.reply_token, format_balance_report(balances))
+    
+    # Set balance
+    elif text.lower().startswith("setbalance"):
+        if len(parts) == 3:
+            place = parts[1].lower()
+            try:
+                target_balance = int(parts[2])
+            except ValueError:
+                return reply_text(event.reply_token, "❌ Invalid amount. Example: setbalance cash 2000")
+
+            balances = get_balance()
+            current_balance = balances.get(place, 0)
+            diff = target_balance - current_balance
+
+            if diff == 0:
+                return reply_text(event.reply_token, f"ℹ️ {place.capitalize()} balance already {target_balance} TWD.")
+
+            # Decide type
+            type_ = "Income" if diff > 0 else "Expense"
+            adjustment_amount = abs(diff)
+            note = "Balance adjustment"
+
+            date_str = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+            transactions_sheet.append_row([date_str, type_, adjustment_amount, "adjustment", place, note])
+
+            return reply_text(event.reply_token,
+                              f"✅ Balance for {place.capitalize()} adjusted by {adjustment_amount} TWD "
+                              f"({type_}). New balance: {target_balance} TWD")
+        else:
+            return reply_text(event.reply_token, "Usage: setbalance place amount\nExample: setbalance cash 2000")
 
     # Monthly report
     elif text.lower().startswith("report"):

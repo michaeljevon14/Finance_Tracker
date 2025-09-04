@@ -252,7 +252,6 @@ def handle_message(event: MessageEvent):
         rows = [[cat.capitalize(), data["total"], data["budget"]] for cat, data in cat_data.items()]
         cat_sheet.update("A2", rows)
 
-
         reply = f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
         return reply_text(event.reply_token, reply)
 
@@ -302,9 +301,116 @@ def handle_message(event: MessageEvent):
         set_budget(category, amount)
         return reply_text(event.reply_token, f"✅ Budget set for {category}: {amount} TWD")
 
+    # ---- Show budget ----
     elif text.lower() == "budget":
         today = datetime.now(TIMEZONE)
         return reply_text(event.reply_token, get_budget_status(today.year, today.month))
+    
+    # Delete last transaction
+    elif parts[0].lower() == "delete" and len(parts) > 1 and parts[1].lower() == "last":
+        transactions = transactions_sheet.get_all_values()
+        if len(transactions) <= 1:
+            reply_text(event.reply_token, "❌ No transactions to delete.")
+            return
+        
+        last_row = transactions[-1]
+        date, category, amount, ttype, place = last_row
+        amount = float(amount)
+
+        # Rollback balance
+        balances = balances_sheet.get_all_records()
+        for i, b in enumerate(balances, start=2):
+            if b["Place"].lower() == place.lower():
+                if ttype.lower() == "income":
+                    balances_sheet.update_cell(i, 2, b["Balance"] - amount)
+                else:  # expense
+                    balances_sheet.update_cell(i, 2, b["Balance"] + amount)
+
+        # Rollback category
+        categories = categories_sheet.get_all_records()
+        for i, c in enumerate(categories, start=2):
+            if c["Category"].lower() == category.lower():
+                categories_sheet.update_cell(i, 2, c["Total"] - amount)
+
+        # Delete last row
+        transactions_sheet.delete_rows(len(transactions))
+
+        reply_text(event.reply_token, f"✅ Deleted last transaction: {category} {amount} ({ttype}).")
+
+    # Reset transactions (daily/weekly/monthly)
+    elif parts[0].lower() == "reset" and len(parts) > 1:
+        period = parts[1].lower()
+        transactions = transactions_sheet.get_all_records()
+
+        from datetime import datetime, timedelta
+        today = datetime.today()
+        
+        if period == "daily":
+            cutoff = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "weekly":
+            cutoff = today - timedelta(days=today.weekday())  # start of week
+        elif period == "monthly":
+            cutoff = today.replace(day=1)
+        else:
+            reply_text(event.reply_token, "❌ Unknown reset period. Use daily, weekly, or monthly.")
+            return
+
+        rows_to_delete = []
+        for i, t in enumerate(transactions, start=2):  # row 2 = first transaction
+            t_date = datetime.strptime(t["Date"], "%Y-%m-%d %H:%M:%S")
+            if t_date >= cutoff:
+                rows_to_delete.append(i)
+
+        if not rows_to_delete:
+            reply_text(event.reply_token, f"ℹ️ No {period} transactions to reset.")
+            return
+
+        for row in reversed(rows_to_delete):  # delete from bottom
+            transactions_sheet.delete_rows(row)
+
+        # After reset, refresh data
+        # (balances & categories auto-fixed)
+        # You can call refresh here:
+        # refresh_data()
+
+        reply_text(event.reply_token, f"🗑️ {period.capitalize()} transactions reset.")
+
+    # Refresh data
+    elif parts[0].lower() == "refresh":
+        balances_sheet.clear()
+        balances_sheet.update("A1:B1", [["Place", "Balance"]])
+        
+        categories_sheet.clear()
+        categories_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+
+        transactions = transactions_sheet.get_all_records()
+        balances = {}
+        categories = {}
+        for t in transactions:
+            place = t["Place"]
+            category = t["Category"]
+            amount = float(t["Amount"])
+            ttype = t["Type"]
+
+            if place not in balances:
+                balances[place] = 0
+            if category not in categories:
+                categories[category] = 0
+
+            if ttype.lower() == "income":
+                balances[place] += amount
+                categories[category] += amount
+            else:
+                balances[place] -= amount
+                categories[category] -= amount
+
+        for place, bal in balances.items():
+            balances_sheet.append_row([place, bal])
+
+        for cat, total in categories.items():
+            categories_sheet.append_row([cat, total, ""])
+
+        reply_text(event.reply_token, "🔄 Data refreshed successfully.")
 
     # ---- Help ----
     elif parts[0].lower() == "help":

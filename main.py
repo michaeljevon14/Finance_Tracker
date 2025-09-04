@@ -197,6 +197,33 @@ def get_monthly_report(year, month):
 
     return report
 
+# Help
+def get_help_text():
+    return (
+        "🤖 Finance Bot Commands:\n\n"
+        "📌 Record Transactions:\n"
+        "- i <amount> <category> <place> [note]\n"
+        "- e <amount> <category> <place> [note]\n"
+        "   ex: e 500 food cash lunch\n"
+        "   ex: i 10000 salary cathay\n\n"
+        "📌 Balance:\n"
+        "- balance → show all balances\n"
+        "- setbalance <place> <amount> → set initial balance for a place\n\n"
+        "📌 Reports:\n"
+        "- report <year>-<month> → monthly report by category\n\n"
+        "📌 Budget:\n"
+        "- setbudget <category> <amount>\n"
+        "- budget → show budgets\n\n"
+        "📌 Data Management:\n"
+        "- delete → remove last transaction\n"
+        "- reset daily → reset today’s transactions\n"
+        "- reset weekly → reset this week’s transactions\n"
+        "- reset monthly → reset this month’s transactions\n"
+        "- refresh → recalc balances & categories (budgets kept, setbalance preserved)\n\n"
+        "📌 Help:\n"
+        "- help → show this message"
+    )
+
 # ===== LINE webhook =====
 @app.post("/callback")
 def callback():
@@ -306,36 +333,42 @@ def handle_message(event: MessageEvent):
         today = datetime.now(TIMEZONE)
         return reply_text(event.reply_token, get_budget_status(today.year, today.month))
     
-    # Delete last transaction
-    elif parts[0].lower() == "delete" and len(parts) > 1 and parts[1].lower() == "last":
-        transactions = transactions_sheet.get_all_values()
-        if len(transactions) <= 1:
-            reply_text(event.reply_token, "❌ No transactions to delete.")
-            return
-        
-        last_row = transactions[-1]
-        date, category, amount, ttype, place = last_row
-        amount = float(amount)
+    elif text.lower() == "delete last":
+        all_rows = transactions_sheet.get_all_values()
+        if len(all_rows) <= 1:
+            return reply_text(event.reply_token, "⚠️ No transactions to delete.")
 
-        # Rollback balance
-        balances = balances_sheet.get_all_records()
-        for i, b in enumerate(balances, start=2):
-            if b["Place"].lower() == place.lower():
-                if ttype.lower() == "income":
-                    balances_sheet.update_cell(i, 2, b["Balance"] - amount)
-                else:  # expense
-                    balances_sheet.update_cell(i, 2, b["Balance"] + amount)
+        last_row = all_rows[-1]
+        transactions_sheet.delete_rows(len(all_rows))
 
-        # Rollback category
-        categories = categories_sheet.get_all_records()
-        for i, c in enumerate(categories, start=2):
-            if c["Category"].lower() == category.lower():
-                categories_sheet.update_cell(i, 2, c["Total"] - amount)
+        # old parsing (wrong order)
+        # date, category, amount, type_, place = last_row[:5]
 
-        # Delete last row
-        transactions_sheet.delete_rows(len(transactions))
+        # ✅ fixed parsing
+        date, type_, amount, category, place, *note = last_row
+        amount = int(amount)
 
-        reply_text(event.reply_token, f"✅ Deleted last transaction: {category} {amount} ({ttype}).")
+        # Rollback balances
+        if type_.lower().startswith("i"):
+            update_balances(place, -amount, "Income")
+        elif type_.lower().startswith("e"):
+            update_balances(place, amount, "Expense")
+
+        # Rollback categories
+        cat_data = get_categories()
+        cat_key = category.lower()
+        if cat_key in cat_data:
+            if type_.lower().startswith("i"):
+                cat_data[cat_key]["total"] -= amount
+            else:
+                cat_data[cat_key]["total"] += amount
+            cat_sheet = spreadsheet.worksheet("Categories")
+            cat_sheet.clear()
+            cat_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+            rows = [[cat.capitalize(), data["total"], data["budget"]] for cat, data in cat_data.items()]
+            cat_sheet.update("A2", rows)
+
+        return reply_text(event.reply_token, f"🗑️ Deleted last transaction: {type_} {amount} {category} at {place}")
 
     # Reset transactions (daily/weekly/monthly)
     elif parts[0].lower() == "reset" and len(parts) > 1:
@@ -365,82 +398,69 @@ def handle_message(event: MessageEvent):
             reply_text(event.reply_token, f"ℹ️ No {period} transactions to reset.")
             return
 
-        for row in reversed(rows_to_delete):  # delete from bottom
-            transactions_sheet.delete_rows(row)
-
-        # After reset, refresh data
-        # (balances & categories auto-fixed)
-        # You can call refresh here:
-        # refresh_data()
-
-        reply_text(event.reply_token, f"🗑️ {period.capitalize()} transactions reset.")
+        for i in reversed(rows_to_delete):
+            transactions_sheet.delete_rows(i)
+        return reply_text(event.reply_token, f"♻️ Reset {period} transactions: {len(rows_to_delete)} deleted.")
 
     # Refresh data
-    elif parts[0].lower() == "refresh":
-        balances_sheet.clear()
-        balances_sheet.update("A1:B1", [["Place", "Balance"]])
-        
-        categories_sheet.clear()
-        categories_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+    elif text.lower() == "refresh":
+        # Get existing balances first (so setbalance values are preserved)
+        balances_records = balances_sheet.get_all_values()[1:]
+        balances = {row[0].capitalize(): int(row[1]) for row in balances_records}
 
-        transactions = transactions_sheet.get_all_records()
-        balances = {}
+        records = transactions_sheet.get_all_records()
         categories = {}
-        for t in transactions:
-            place = t["Place"]
-            category = t["Category"]
-            amount = float(t["Amount"])
-            ttype = t["Type"]
 
+        for row in records:
+            amount = row["Amount"]
+            place = row["Place"].capitalize()
+            category = row["Category"].lower()
+            type_ = row["Type"].lower()
+
+            # Balances
             if place not in balances:
                 balances[place] = 0
-            if category not in categories:
-                categories[category] = 0
-
-            if ttype.lower() == "income":
+            if type_.startswith("i"):
                 balances[place] += amount
-                categories[category] += amount
-            else:
+            elif type_.startswith("e"):
                 balances[place] -= amount
-                categories[category] -= amount
 
-        for place, bal in balances.items():
-            balances_sheet.append_row([place, bal])
+            # Categories (only totals recalculated, budget preserved later)
+            if category not in categories:
+                categories[category] = {"total": 0}
+            if type_.startswith("i"):
+                categories[category]["total"] += amount
+            elif type_.startswith("e"):
+                categories[category]["total"] -= amount
 
-        for cat, total in categories.items():
-            categories_sheet.append_row([cat, total, ""])
+        # --- Update Balances sheet ---
+        balances_sheet.clear()
+        balances_sheet.update("A1:B1", [["Place", "Balance"]])
+        rows = [[p, b] for p, b in balances.items()]
+        balances_sheet.update("A2", rows)
 
-        reply_text(event.reply_token, "🔄 Data refreshed successfully.")
+        # --- Update Categories sheet, keep budgets ---
+        cat_data = get_categories()
+        for cat, data in categories.items():
+            if cat in cat_data:
+                cat_data[cat]["total"] = data["total"]  # update only total
+            else:
+                cat_data[cat] = {"total": data["total"], "budget": 0}  # new cat
+
+        cat_sheet = spreadsheet.worksheet("Categories")
+        cat_sheet.clear()
+        cat_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+        rows = [[cat.capitalize(), data["total"], data["budget"]] for cat, data in cat_data.items()]
+        cat_sheet.update("A2", rows)
+
+        return reply_text(event.reply_token, "🔄 Data refreshed! (Budgets kept, SetBalance preserved)")
 
     # ---- Help ----
     elif parts[0].lower() == "help":
-        help_text = (
-            "🤖 Finance Bot Commands:\n\n"
-            "📌 Record Transactions:\n"
-            "- i <amount> <category> <place> [note]\n"
-            "- e <amount> <category> <place> [note]\n\n"
-            "📌 Balance:\n"
-            "- balance → show all balances\n"
-            "- setbalance <place> <amount> → set initial balance for a place\n\n"
-            "📌 Reports:\n"
-            "- report <year>-<month> → monthly report by category\n\n"
-            "📌 Budget:\n"
-            "- setbudget <category> <amount>\n"
-            "- budget → show budgets\n\n"
-            "📌 Help:\n"
-            "- help → show this message"
-        )
-        return reply_text(event.reply_token, help_text)
+        return reply_text(event.reply_token, get_help_text())
 
     # ---- Default ----
-    else:
-        reply = (
-            "Available commands:\n"
-            "e/i amount category place note(optional)\n"
-            "balance | report YYYY-MM | setbudget category amount | budget\n"
-            "setbalance place amount | delete last | reset daily/weekly/monthly | refresh"
-        )
-        return reply_text(event.reply_token, reply)
+    return reply_text(event.reply_token, get_help_text())
 
 def reply_text(reply_token: str, message: str):
     with ApiClient(configuration) as api_client:

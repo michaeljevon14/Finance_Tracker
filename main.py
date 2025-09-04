@@ -3,7 +3,6 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# Timezone constant
 TIMEZONE = ZoneInfo("Asia/Taipei")
 
 from flask import Flask, request, abort
@@ -33,6 +32,7 @@ if not CHANNEL_ACCESS_TOKEN:
     missing.append("CHANNEL_ACCESS_TOKEN")
 if not GOOGLE_CREDENTIALS_JSON:
     missing.append("GOOGLE_CREDENTIALS_JSON")
+
 if missing:
     raise RuntimeError("Missing environment variables: " + ", ".join(missing))
 
@@ -63,6 +63,13 @@ except gspread.exceptions.WorksheetNotFound:
     for p in ["Cash", "Post", "Cathay"]:
         balances_sheet.append_row([p, 0])
 
+# Ensure Categories sheet exists
+try:
+    categories_sheet = spreadsheet.worksheet("Categories")
+except gspread.exceptions.WorksheetNotFound:
+    categories_sheet = spreadsheet.add_worksheet(title="Categories", rows="100", cols="2")
+    categories_sheet.update("A1:B1", [["Category", "Total"]])
+
 # LINE API
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
@@ -78,53 +85,86 @@ def get_categories():
     categories.update(budgets.keys())
     return sorted(categories)
 
+def update_category_total(category, type_, amount):
+    category = category.capitalize()
+    records = categories_sheet.get_all_values()[1:]  # skip header
+    category_dict = {row[0]: int(row[1]) for row in records}
+
+    # For expense, subtract; for income, add
+    delta = amount if type_.lower().startswith("i") else -amount
+
+    if category in category_dict:
+        category_dict[category] += delta
+    else:
+        category_dict[category] = delta
+
+    # Rewrite sheet
+    categories_sheet.clear()
+    categories_sheet.update("A1:B1", [["Category", "Total"]])
+    rows = [[cat, total] for cat, total in category_dict.items()]
+    categories_sheet.update("A2", rows)
+
 # ===== Balances =====
 def get_balance():
-    # Return balances directly from Balances sheet.
-    records = balances_sheet.get_all_values()[1:]  # skip header
-    return {row[0].lower(): int(row[1]) for row in records}
+    records = transactions_sheet.get_all_records()
+    balances_records = balances_sheet.get_all_values()[1:]
+    balances = {row[0].capitalize(): int(row[1]) for row in balances_records}
+
+    # Apply transactions dynamically
+    for row in records:
+        amount = row["Amount"]
+        place = row["Place"].capitalize()
+        if place not in balances:
+            balances[place] = 0
+        if row["Type"].lower().startswith("i"):
+            balances[place] += amount
+        elif row["Type"].lower().startswith("e"):
+            balances[place] -= amount
+    return balances
 
 def update_balances(place, amount, type_):
-    # Update balances sheet based on a new transaction.
-    balances = get_balance()
-    place_key = place.lower()
-    if place_key not in balances:
-        balances[place_key] = 0
+    balances_records = balances_sheet.get_all_values()[1:]
+    balances = {row[0].capitalize(): int(row[1]) for row in balances_records}
+    place = place.capitalize()
+    if place not in balances:
+        balances[place] = 0
+    if type_.lower().startswith("i"):
+        balances[place] += amount
+    else:
+        balances[place] -= amount
 
-    balances[place_key] += amount if type_.lower().startswith("i") else -amount
-
-    # Rewrite Balances sheet
+    # Rewrite sheet
     balances_sheet.clear()
     balances_sheet.update("A1:B1", [["Place", "Balance"]])
-    rows = [[p.capitalize(), b] for p, b in balances.items()]
+    rows = [[p, b] for p, b in balances.items()]
     balances_sheet.update("A2", rows)
 
 def format_balance_report(balances):
     report = "📊 Current Balances:\n"
     total = 0
     for place, amt in balances.items():
-        report += f"- {place.capitalize()}: {amt} TWD\n"
+        report += f"- {place}: {amt} TWD\n"
         total += amt
     report += f"💰 Total: {total} TWD"
     return report
 
-# ===== Monthly Report =====
+# ===== Monthly report =====
 def get_monthly_report(year, month):
     records = transactions_sheet.get_all_records()
     total_income, total_expense = 0, 0
     categories = get_categories()
-    income_by_cat = {cat.lower(): 0 for cat in categories}
-    expense_by_cat = {cat.lower(): 0 for cat in categories}
+    income_by_cat = {cat: 0 for cat in categories}
+    expense_by_cat = {cat: 0 for cat in categories}
 
     for row in records:
         row_date = datetime.strptime(row["Date"], "%Y-%m-%d %H:%M:%S")
         if row_date.year == year and row_date.month == month:
-            category = row["Category"].lower()
             amount = row["Amount"]
+            category = row["Category"].lower()
             if row["Type"].lower().startswith("i"):
                 total_income += amount
                 income_by_cat[category] = income_by_cat.get(category, 0) + amount
-            else:
+            elif row["Type"].lower().startswith("e"):
                 total_expense += amount
                 expense_by_cat[category] = expense_by_cat.get(category, 0) + amount
 
@@ -141,9 +181,11 @@ def get_monthly_report(year, month):
     )
     for cat, amt in sorted_income:
         report += f"- {cat.capitalize()}: {amt} TWD\n"
+
     report += "\nExpenses by Category:\n"
     for cat, amt in sorted_expense:
         report += f"- {cat.capitalize()}: {amt} TWD\n"
+
     return report
 
 # ===== Budgeting =====
@@ -169,11 +211,13 @@ def get_budget_status(year, month):
     budgets = get_budgets()
     records = transactions_sheet.get_all_records()
     spent = {}
+
     for row in records:
         row_date = datetime.strptime(row["Date"], "%Y-%m-%d %H:%M:%S")
-        if row_date.year == year and row_date.month == month and row["Type"].lower().startswith("e"):
-            cat = row["Category"].lower()
-            spent[cat] = spent.get(cat, 0) + row["Amount"]
+        if row_date.year == year and row_date.month == month:
+            if row["Type"].lower().startswith("e"):
+                cat = row["Category"].lower()
+                spent[cat] = spent.get(cat, 0) + row["Amount"]
 
     report = f"🎯 Budget Status ({year}-{month:02d})\n"
     for cat, limit in budgets.items():
@@ -190,7 +234,6 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("❌ Invalid signature. Check CHANNEL_SECRET.")
         abort(400)
     return "OK"
 
@@ -201,15 +244,14 @@ def handle_message(event: MessageEvent):
     if not parts:
         return
 
-    # ----- Record Transaction -----
-    if parts[0].lower() in ("e", "i", "expense", "income"):
-        type_ = "Expense" if parts[0].lower() in ("e", "expense") else "Income"
+    # ---- Record transaction ----
+    if parts[0].lower() in ("i", "income", "e", "expense"):
+        type_ = "Income" if parts[0].lower() in ("i", "income") else "Expense"
         try:
             amount = int(parts[1])
         except Exception:
             return reply_text(event.reply_token,
-                              "Format: e/i/income/expense amount category place note(optional)\n"
-                              "Ex: e 500 food cash lunch")
+                "Format: e/i amount category place note(optional)\nex: e 500 food cash lunch")
 
         category = parts[2] if len(parts) > 2 else "Other"
         place = parts[3] if len(parts) > 3 else "Unknown"
@@ -218,46 +260,36 @@ def handle_message(event: MessageEvent):
         date_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
         transactions_sheet.append_row([date_str, type_, amount, category, place, note])
         update_balances(place, amount, type_)
+        update_category_total(category, type_, amount)
 
-        reply = f"✅ NT${amount:,} {type_} ({category}) {'from' if type_=='Expense' else 'to'} {place} saved."
+        reply = f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
         return reply_text(event.reply_token, reply)
 
-    # ----- Balance -----
-    if text.lower() == "balance":
+    # ---- Balance ----
+    elif text.lower() == "balance":
         balances = get_balance()
         return reply_text(event.reply_token, format_balance_report(balances))
 
-    # ----- Set Balance -----
-    if parts[0].lower() == "setbalance" and len(parts) == 3:
-        place = parts[1]
+    # ---- Set initial balance ----
+    elif parts[0].lower() == "setbalance" and len(parts) == 3:
+        place = parts[1].capitalize()
         try:
-            target_balance = int(parts[2])
+            amount = int(parts[2])
         except ValueError:
             return reply_text(event.reply_token, "❌ Invalid amount. Example: setbalance cash 2000")
 
-        balances = get_balance()
-        current_balance = balances.get(place.lower(), 0)
-        diff = target_balance - current_balance
+        balances_records = balances_sheet.get_all_values()[1:]
+        balances = {row[0].capitalize(): int(row[1]) for row in balances_records}
+        balances[place] = amount
+        balances_sheet.clear()
+        balances_sheet.update("A1:B1", [["Place", "Balance"]])
+        rows = [[p, b] for p, b in balances.items()]
+        balances_sheet.update("A2", rows)
 
-        if diff == 0:
-            return reply_text(event.reply_token, f"ℹ️ {place.capitalize()} balance already {target_balance} TWD.")
+        return reply_text(event.reply_token, f"✅ Balance for {place} set: {amount} TWD")
 
-        type_ = "Income" if diff > 0 else "Expense"
-        adjustment_amount = abs(diff)
-        date_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Log the adjustment as a transaction
-        transactions_sheet.append_row([date_str, type_, adjustment_amount, "adjustment", place, "Balance adjustment"])
-        
-        # Update the Balances sheet directly
-        update_balances(place, adjustment_amount, type_)
-
-        return reply_text(event.reply_token,
-                        f"✅ Balance for {place.capitalize()} adjusted by {adjustment_amount} TWD ({type_}). "
-                        f"New balance: {target_balance} TWD")
-
-    # ----- Monthly Report -----
-    if text.lower().startswith("report"):
+    # ---- Monthly report ----
+    elif text.lower().startswith("report"):
         if len(parts) == 2:
             try:
                 year, month = map(int, parts[1].split("-"))
@@ -269,19 +301,19 @@ def handle_message(event: MessageEvent):
             year, month = today.year, today.month
         return reply_text(event.reply_token, get_monthly_report(year, month))
 
-    # ----- Set Budget -----
-    if parts[0].lower() == "setbudget" and len(parts) == 3:
+    # ---- Set budget ----
+    elif text.lower().startswith("setbudget") and len(parts) == 3:
         category, amount = parts[1], int(parts[2])
         set_budget(category, amount)
         return reply_text(event.reply_token, f"✅ Budget set for {category}: {amount} TWD")
 
-    # ----- View Budget -----
-    if text.lower() == "budget":
+    # ---- View budget ----
+    elif text.lower() == "budget":
         today = datetime.today()
         return reply_text(event.reply_token, get_budget_status(today.year, today.month))
 
-    # ----- Help -----
-    if parts[0].lower() == "help":
+    # ---- Help ----
+    elif parts[0].lower() == "help":
         help_text = (
             "🤖 Finance Bot Commands:\n\n"
             "📌 Record Transactions:\n"
@@ -289,7 +321,7 @@ def handle_message(event: MessageEvent):
             "- e <amount> <category> <place> [note]\n\n"
             "📌 Balance:\n"
             "- balance → show all balances\n"
-            "- setbalance <place> <amount> → set or reset balance for a place\n\n"
+            "- setbalance <place> <amount> → set initial balance for a place\n\n"
             "📌 Reports:\n"
             "- report <year>-<month> → monthly report by category\n\n"
             "📌 Budget:\n"
@@ -300,7 +332,7 @@ def handle_message(event: MessageEvent):
         )
         return reply_text(event.reply_token, help_text)
 
-    # ----- Fallback -----
+    # ---- Default ----
     reply = (
         "Format: e/i/income/expense amount category place note(optional)\n"
         "Examples:\n"

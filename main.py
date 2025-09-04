@@ -52,7 +52,6 @@ spreadsheet = gc.open(SHEET_NAME)
 
 # Worksheets
 transactions_sheet = spreadsheet.worksheet("Transactions")
-budgets_sheet = spreadsheet.worksheet("Budgets")
 
 # Ensure Balances sheet exists
 try:
@@ -67,42 +66,52 @@ except gspread.exceptions.WorksheetNotFound:
 try:
     categories_sheet = spreadsheet.worksheet("Categories")
 except gspread.exceptions.WorksheetNotFound:
-    categories_sheet = spreadsheet.add_worksheet(title="Categories", rows="100", cols="2")
-    categories_sheet.update("A1:B1", [["Category", "Total"]])
+    categories_sheet = spreadsheet.add_worksheet(title="Categories", rows="100", cols="3")
+    categories_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+
+if categories_sheet.col_count < 3:
+    categories_sheet.add_cols(1)  # add budget column
+    categories_sheet.update("C1", "Budget")
 
 # LINE API
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# ===== Categories =====
+# ===== Categories (combined with budgets) =====
 def get_categories():
-    records = transactions_sheet.get_all_records()
-    categories = set()
-    for row in records:
-        if row.get("Category"):
-            categories.add(row["Category"].lower())
-    budgets = get_budgets()
-    categories.update(budgets.keys())
-    return sorted(categories)
+    try:
+        cat_sheet = spreadsheet.worksheet("Categories")
+    except gspread.exceptions.WorksheetNotFound:
+        cat_sheet = spreadsheet.add_worksheet(title="Categories", rows="100", cols="3")
+        cat_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+    records = cat_sheet.get_all_records()
+    # Dict: category -> {"total": total_amount, "budget": budget_amount}
+    return {row["Category"].lower(): {"total": row["Total"], "budget": row["Budget"]} for row in records}
 
-def update_category_total(category, type_, amount):
-    category = category.capitalize()
-    records = categories_sheet.get_all_values()[1:]  # skip header
-    category_dict = {row[0]: int(row[1]) for row in records}
-
-    # For expense, subtract; for income, add
-    delta = amount if type_.lower().startswith("i") else -amount
-
-    if category in category_dict:
-        category_dict[category] += delta
+def set_budget(category, amount):
+    cat_data = get_categories()
+    cat_key = category.strip().lower()
+    if cat_key in cat_data:
+        cat_data[cat_key]["budget"] = amount
     else:
-        category_dict[category] = delta
+        cat_data[cat_key] = {"total": 0, "budget": amount}
 
     # Rewrite sheet
-    categories_sheet.clear()
-    categories_sheet.update("A1:B1", [["Category", "Total"]])
-    rows = [[cat, total] for cat, total in category_dict.items()]
-    categories_sheet.update("A2", rows)
+    cat_sheet = spreadsheet.worksheet("Categories")
+    cat_sheet.clear()
+    cat_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+    rows = [[cat.capitalize(), data["total"], data["budget"]] for cat, data in cat_data.items()]
+    cat_sheet.update("A2", rows)
+
+def get_budget_status(year, month):
+    cat_data = get_categories()
+    report = f"🎯 Budget Status ({year}-{month:02d})\n"
+    for cat, data in cat_data.items():
+        used = abs(data["total"])  # always use absolute value for expenses
+        limit = data["budget"]
+        pct = int((used / limit) * 100) if limit > 0 else 0
+        report += f"- {cat.capitalize()}: {used} / {limit} TWD ({pct}%)\n"
+    return report
 
 # ===== Balances =====
 def get_balance():
@@ -188,44 +197,6 @@ def get_monthly_report(year, month):
 
     return report
 
-# ===== Budgeting =====
-def get_budgets():
-    try:
-        budget_sheet = spreadsheet.worksheet("Budgets")
-    except gspread.exceptions.WorksheetNotFound:
-        budget_sheet = spreadsheet.add_worksheet(title="Budgets", rows="100", cols="2")
-        budget_sheet.update("A1:B1", [["Category", "Amount"]])
-    records = budget_sheet.get_all_records()
-    return {row["Category"].lower(): row["Amount"] for row in records}
-
-def set_budget(category, amount):
-    budgets = get_budgets()
-    budgets[category.lower()] = amount
-    budget_sheet = spreadsheet.worksheet("Budgets")
-    budget_sheet.clear()
-    budget_sheet.update("A1:B1", [["Category", "Amount"]])
-    rows = [[cat, amt] for cat, amt in budgets.items()]
-    budget_sheet.update("A2", rows)
-
-def get_budget_status(year, month):
-    budgets = get_budgets()
-    records = transactions_sheet.get_all_records()
-    spent = {}
-
-    for row in records:
-        row_date = datetime.strptime(row["Date"], "%Y-%m-%d %H:%M:%S")
-        if row_date.year == year and row_date.month == month:
-            if row["Type"].lower().startswith("e"):
-                cat = row["Category"].lower()
-                spent[cat] = spent.get(cat, 0) + row["Amount"]
-
-    report = f"🎯 Budget Status ({year}-{month:02d})\n"
-    for cat, limit in budgets.items():
-        used = spent.get(cat, 0)
-        pct = int((used / limit) * 100) if limit > 0 else 0
-        report += f"- {cat.capitalize()}: {used} / {limit} TWD ({pct}%)\n"
-    return report
-
 # ===== LINE webhook =====
 @app.post("/callback")
 def callback():
@@ -260,7 +231,27 @@ def handle_message(event: MessageEvent):
         date_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
         transactions_sheet.append_row([date_str, type_, amount, category, place, note])
         update_balances(place, amount, type_)
-        update_category_total(category, type_, amount)
+
+        # Update Categories sheet whenever a transaction is added
+        cat_data = get_categories()
+        cat_key = category.lower()
+        if cat_key in cat_data:
+            # Update total
+            if type_ == "Income":
+                cat_data[cat_key]["total"] += amount
+            else:
+                cat_data[cat_key]["total"] = int(cat_data[cat_key]["total"]) - amount
+        else:
+            # Add new category with initial total
+            cat_data[cat_key] = {"total": amount, "budget": 0}
+
+        # Rewrite sheet
+        cat_sheet = spreadsheet.worksheet("Categories")
+        cat_sheet.clear()
+        cat_sheet.update("A1:C1", [["Category", "Total", "Budget"]])
+        rows = [[cat.capitalize(), data["total"], data["budget"]] for cat, data in cat_data.items()]
+        cat_sheet.update("A2", rows)
+
 
         reply = f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
         return reply_text(event.reply_token, reply)
@@ -294,22 +285,25 @@ def handle_message(event: MessageEvent):
             try:
                 year, month = map(int, parts[1].split("-"))
             except Exception:
-                today = datetime.today()
+                today = datetime.now(TIMEZONE)
                 year, month = today.year, today.month
         else:
-            today = datetime.today()
+            today = datetime.now(TIMEZONE)
             year, month = today.year, today.month
         return reply_text(event.reply_token, get_monthly_report(year, month))
 
     # ---- Set budget ----
     elif text.lower().startswith("setbudget") and len(parts) == 3:
-        category, amount = parts[1], int(parts[2])
+        category = parts[1]
+        try:
+            amount = int(parts[2])
+        except ValueError:
+            return reply_text(event.reply_token, "❌ Invalid amount. Example: setbudget food 5000")
         set_budget(category, amount)
         return reply_text(event.reply_token, f"✅ Budget set for {category}: {amount} TWD")
 
-    # ---- View budget ----
     elif text.lower() == "budget":
-        today = datetime.today()
+        today = datetime.now(TIMEZONE)
         return reply_text(event.reply_token, get_budget_status(today.year, today.month))
 
     # ---- Help ----
@@ -339,7 +333,9 @@ def handle_message(event: MessageEvent):
         "- e 500 food cash lunch\n"
         "- i 10000 salary cathay\n"
         "- income 10000 salary cathay\n"
-        "- expense 500 food cash lunch"
+        "- expense 500 food cash lunch\n"
+        "- setbudget food 5000\n"
+        "- setbalance cash 2000"
     )
     return reply_text(event.reply_token, reply)
 

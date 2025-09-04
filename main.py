@@ -319,6 +319,27 @@ def handle_message(event: MessageEvent):
     elif text.lower() == "budget":
         today = datetime.today()
         return reply_text(event.reply_token, get_budget_status(today.year, today.month))
+    
+    # Help command
+    elif parts[0].lower() == "help":
+        help_text = (
+            "🤖 Finance Bot Commands:\n\n"
+            "📌 Record Transactions:\n"
+            "- income <amount> <category> <place> [note]\n"
+            "- expense <amount> <category> <place> [note]\n\n"
+            "📌 Balance:\n"
+            "- balance → show all balances\n"
+            "- setbalance <place> <amount> → set or reset balance for a place\n\n"
+            "📌 Reports:\n"
+            "- report <year> <month> → monthly report by category\n\n"
+            "📌 Budget:\n"
+            "- setbudget <category> <amount>\n"
+            "- budget → show budgets\n\n"
+            "📌 Help:\n"
+            "- help → show this message"
+        )
+        return reply_text(event.reply_token, help_text)
+
 
     # Help
     reply = "Format: e/i amount category place note(optional)\nex: e 500 food cash lunch | i 10000 salary cathay"

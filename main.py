@@ -80,7 +80,7 @@ def get_balance_report():
     report = "📊 Current Balances:\n"
     for row in rows:
         place, initial, balance, net = row
-        report += f"- {place}: Init={initial}, Balance={balance}, Net={net}\n"
+        report += f"- {place}: In {initial}, Bal {balance}, Net {net}\n"
     return report
 
 def set_budget(category, amount):
@@ -99,7 +99,7 @@ def get_budget_report():
     report = "🎯 Budgets:\n"
     for row in rows:
         category, income, expense, net, budget, remaining = row
-        report += f"- {category}: Spent {expense}, Budget {budget}, Remaining {remaining}\n"
+        report += f"- {category}: Exp {expense}, Bud {budget}, Rem {remaining}\n"
     return report
 
 def get_report(year, month):

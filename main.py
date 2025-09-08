@@ -138,14 +138,15 @@ def handle_message(event: MessageEvent):
             amount = int(parts[1])
         except:
             return reply_text(event.reply_token, "❌ Format: e/i amount category place note(optional)")
-        category = parts[2] if len(parts) > 2 else "Other"
-        place = parts[3] if len(parts) > 3 else "Unknown"
+        category = (parts[2] if len(parts) > 2 else "Other").capitalize()
+        place = (parts[3] if len(parts) > 3 else "Unknown").capitalize()
         note = " ".join(parts[4:]) if len(parts) > 4 else ""
         return reply_text(event.reply_token, add_transaction(type_, amount, category, place, note))
 
     # ---- Transfer ----
     elif cmd == "transfer" and len(parts) >= 4:
-        from_place, to_place, amount = parts[1], parts[2], int(parts[3])
+        from_place, to_place = parts[1].capitalize(), parts[2].capitalize()
+        amount = int(parts[3])
         note = " ".join(parts[4:]) if len(parts) > 4 else ""
         return reply_text(event.reply_token, add_transfer(from_place, to_place, amount, note))
 
@@ -153,12 +154,14 @@ def handle_message(event: MessageEvent):
     elif cmd == "balance":
         return reply_text(event.reply_token, get_balance_report())
     elif cmd == "setbalance" and len(parts) == 3:
-        place, amount = parts[1], int(parts[2])
+        place = parts[1].capitalize()
+        amount = int(parts[2])
         return reply_text(event.reply_token, set_balance(place, amount))
 
     # ---- Budget ----
     elif cmd == "setbudget" and len(parts) == 3:
-        category, amount = parts[1], int(parts[2])
+        category = parts[1].capitalize()
+        amount = int(parts[2])
         return reply_text(event.reply_token, set_budget(category, amount))
     elif cmd == "budget":
         return reply_text(event.reply_token, get_budget_report())

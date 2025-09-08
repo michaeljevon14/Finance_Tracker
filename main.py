@@ -55,12 +55,12 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 # ===== SHEET FUNCTIONS =====
 def add_transaction(type_, amount, category, place, note=""):
-    date_str = datetime.now(TIMEZONE).strftime("%Y/%m/%d %H:%M:%S")
+    date_str = datetime.now(TIMEZONE).strftime("%m/%d/%Y %H:%M:%S")
     transactions_sheet.append_row([date_str, type_, amount, category, place, note])
     return f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
 
 def add_transfer(from_place, to_place, amount, note=""):
-    date_str = datetime.now(TIMEZONE).strftime("%Y/%m/%d %H:%M:%S")
+    date_str = datetime.now(TIMEZONE).strftime("%m/%d/%Y %H:%M:%S")
     transfers_sheet.append_row([date_str, from_place, to_place, amount, note])
     return f"🔄 Transfer {amount} TWD from {from_place} to {to_place} saved."
 

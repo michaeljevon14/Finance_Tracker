@@ -1,0 +1,12 @@
+to-be-add:
+1. transfer between places DONE
+2. search transaction DONE
+3. change income by category, differ with expenses
+4. change total in categories from negative to positive
+5. utilize reports sheet
+
+to-be-fix:
+1. extended delete command
+2. extended reset command (whole data)
+3. balance-transaction-budget value readjustment
+4. mismatched data sheets-python

@@ -49,19 +49,23 @@ categories_sheet = spreadsheet.worksheet("Categories")
 transfers_sheet = spreadsheet.worksheet("Transfers")
 reports_sheet = spreadsheet.worksheet("Reports")
 
-date_str = datetime.now(TIMEZONE).strftime("%m/%d/%Y %H:%M:%S")
-
 # LINE
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 # ===== SHEET FUNCTIONS =====
 def add_transaction(type_, amount, category, place, note=""):
-    transactions_sheet.append_row([date_str, type_, amount, category, place, note])
+    date_value = datetime.now(TIMEZONE)
+    date_text = date_value.strftime("%m/%d/%Y %H:%M:%S")
+    transactions_sheet.append_row([date_text, type_, amount, category, place, note], value_input_option="USER_ENTERED")
+    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | {type_} | {amount} | {category} | {place}")
     return f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
 
 def add_transfer(from_place, to_place, amount, note=""):
-    transfers_sheet.append_row([date_str, from_place, to_place, amount, note])
+    date_value = datetime.now(TIMEZONE)
+    date_text = date_value.strftime("%m/%d/%Y %H:%M:%S")
+    transfers_sheet.append_row([date_text, from_place, to_place, amount, note], value_input_option="USER_ENTERED")
+    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | Transfer | {amount} |  | {from_place} | {to_place}")
     return f"🔄 Transfer {amount} TWD from {from_place} to {to_place} saved."
 
 def set_balance(place, amount):

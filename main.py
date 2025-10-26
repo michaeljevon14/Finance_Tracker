@@ -87,25 +87,6 @@ def get_balance_report():
         report += f"- {place}: In {initial}, Bal {balance}, Net {net}\n"
     return report
 
-def set_budget(category, amount):
-    values = categories_sheet.get_all_values()
-    categories = [row[0].lower() for row in values[1:]]
-    if category.lower() in categories:
-        row_idx = categories.index(category.lower()) + 2
-        categories_sheet.update_cell(row_idx, 5, amount)  # col E = Budget
-    else:
-        categories_sheet.append_row([category.capitalize(), 0, 0, 0, amount, 0])
-    return f"✅ Budget set for {category}: {amount} TWD"
-
-def get_budget_report():
-    values = categories_sheet.get_all_values()
-    rows = values[1:]
-    report = "🎯 Budgets:\n"
-    for row in rows:
-        category, income, expense, net, budget, remaining = row
-        report += f"- {category}: Exp {expense}, Bud {budget}, Rem {remaining}\n"
-    return report
-
 def get_report(year, month):
     values = reports_sheet.get_all_values()
     header = values[0]
@@ -162,14 +143,6 @@ def handle_message(event: MessageEvent):
         amount = int(parts[2])
         return reply_text(event.reply_token, set_balance(place, amount))
 
-    # ---- Budget ----
-    elif cmd == "setbudget" and len(parts) == 3:
-        category = parts[1].capitalize()
-        amount = int(parts[2])
-        return reply_text(event.reply_token, set_budget(category, amount))
-    elif cmd == "budget":
-        return reply_text(event.reply_token, get_budget_report())
-
     # ---- Report ----
     elif cmd == "report":
         today = datetime.now(TIMEZONE)
@@ -194,9 +167,6 @@ def handle_message(event: MessageEvent):
             "📌 Balances:\n"
             "- balance\n"
             "- setbalance <place> <amount>\n\n"
-            "📌 Budgets:\n"
-            "- setbudget <category> <amount>\n"
-            "- budget\n\n"
             "📌 Reports:\n"
             "- report <year>-<month>\n\n"
             "📌 Other:\n"

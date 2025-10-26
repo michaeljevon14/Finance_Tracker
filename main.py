@@ -73,28 +73,103 @@ def set_balance(place, amount):
     places = [row[0].lower() for row in values[1:]]  # skip header
     if place.lower() in places:
         row_idx = places.index(place.lower()) + 2
-        balances_sheet.update_cell(row_idx, 2, amount)  # column B = Initial
+        balances_sheet.update_cell(row_idx, 2, amount)  # column B = Initial Balance
     else:
-        balances_sheet.append_row([place.capitalize(), amount])
-    return f"✅ Initial balance for {place.capitalize()} set: {amount} TWD"
+        balances_sheet.append_row([place.capitalize(), amount, "", ""])  # Place, Initial, Balance (formula), Net (formula)
+    return f"✅ Initial balance for {place.capitalize()} set: NT${amount:,}"
 
 def get_balance_report():
     values = balances_sheet.get_all_values()
+    if len(values) <= 1:
+        return "📊 No balances found."
+    
     rows = values[1:]
     report = "📊 Current Balances:\n"
     for row in rows:
-        place, initial, balance, net = row
-        report += f"- {place}: In {initial}, Bal {balance}, Net {net}\n"
+        if len(row) < 4:
+            continue
+        place, initial, balance, net = row[0], row[1], row[2], row[3]
+        report += f"• {place}: NT${net}\n"
+        report += f"  (Initial: {initial}, Balance: {balance})\n"
+    return report
+
+def get_categories_report():
+    values = categories_sheet.get_all_values()
+    if len(values) <= 1:
+        return "📊 No categories found."
+    
+    header = values[0]  # Category | Income | Expense | Net
+    rows = values[1:]
+    
+    total_income = 0
+    total_expense = 0
+    
+    report = "📊 Categories Summary:\n\n"
+    report += "📈 Income:\n"
+    for row in rows:
+        if len(row) < 4:
+            continue
+        category, income, expense, net = row[0], row[1], row[2], row[3]
+        try:
+            income_val = float(str(income).replace('$', '').replace(',', '')) if income else 0
+            expense_val = float(str(expense).replace('$', '').replace(',', '')) if expense else 0
+            
+            if income_val > 0:
+                report += f"  • {category}: NT${income_val:,.0f}\n"
+                total_income += income_val
+        except:
+            continue
+    
+    report += f"\n💰 Total Income: NT${total_income:,.0f}\n\n"
+    report += "📉 Expenses:\n"
+    
+    for row in rows:
+        if len(row) < 4:
+            continue
+        category, income, expense, net = row[0], row[1], row[2], row[3]
+        try:
+            income_val = float(str(income).replace('$', '').replace(',', '')) if income else 0
+            expense_val = float(str(expense).replace('$', '').replace(',', '')) if expense else 0
+            
+            if expense_val > 0:
+                report += f"  • {category}: NT${expense_val:,.0f}\n"
+                total_expense += expense_val
+        except:
+            continue
+    
+    report += f"\n💸 Total Expense: NT${total_expense:,.0f}\n"
+    report += f"💵 Net: NT${(total_income - total_expense):,.0f}"
+    
     return report
 
 def get_report(year, month):
     values = reports_sheet.get_all_values()
-    header = values[0]
+    if len(values) <= 1:
+        return f"📅 No report found for {year}-{month:02d}"
+    
+    header = values[0]  # Month | Income | Expense | Net | Category1 | Amount1 | Category2 | Amount2 | Category3 | Amount3
     rows = values[1:]
-    report = f"📅 Report for {year}-{month:02d}\n"
+    
+    target_month = f"{year}-{month:02d}"
+    
     for row in rows:
-        report += " | ".join(row) + "\n"
-    return report
+        if len(row) < 1:
+            continue
+        if row[0] == target_month:
+            report = f"📅 Report for {target_month}\n\n"
+            report += f"📈 Income: NT${row[1]}\n"
+            report += f"📉 Expense: NT${row[2]}\n"
+            report += f"💵 Net: NT${row[3]}\n"
+            
+            if len(row) > 4 and row[4]:
+                report += f"\n🔥 Top Expenses:\n"
+                for i in range(4, min(len(row), 10), 2):
+                    if i+1 < len(row) and row[i]:
+                        report += f"  • {row[i]}: NT${row[i+1]}\n"
+            
+            return report
+    
+    return f"📅 No report found for {target_month}"
 
 # ===== LINE CALLBACK =====
 @app.post("/callback")
@@ -142,6 +217,10 @@ def handle_message(event: MessageEvent):
         place = parts[1].capitalize()
         amount = int(parts[2])
         return reply_text(event.reply_token, set_balance(place, amount))
+    
+    # ---- Categories ----
+    elif cmd == "categories":
+        return reply_text(event.reply_token, get_categories_report())
 
     # ---- Report ----
     elif cmd == "report":
@@ -160,17 +239,18 @@ def handle_message(event: MessageEvent):
         help_text = (
             "🤖 Finance Bot Commands:\n\n"
             "📌 Transactions:\n"
-            "- i <amount> <category> <place> [note]\n"
-            "- e <amount> <category> <place> [note]\n\n"
+            "  i <amount> <category> <place> [note]\n"
+            "  e <amount> <category> <place> [note]\n\n"
             "📌 Transfers:\n"
-            "- transfer <from> <to> <amount> [note]\n\n"
+            "  transfer <from> <to> <amount> [note]\n\n"
             "📌 Balances:\n"
-            "- balance\n"
-            "- setbalance <place> <amount>\n\n"
+            "  balance\n"
+            "  setbalance <place> <amount>\n\n"
             "📌 Reports:\n"
-            "- report <year>-<month>\n\n"
+            "  categories\n"
+            "  report [YYYY-MM]\n\n"
             "📌 Other:\n"
-            "- help"
+            "  help"
         )
         return reply_text(event.reply_token, help_text)
 

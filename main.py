@@ -54,12 +54,16 @@ configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 # ===== SHEET FUNCTIONS =====
-def add_transaction(type_, amount, category, place, note=""):
+def add_transaction(type_, amount, category, place, note="", invoice_number=""):
     date_value = datetime.now(TIMEZONE)
     date_text = date_value.strftime("%m/%d/%Y %H:%M:%S")
-    transactions_sheet.append_row([date_text, type_, amount, category, place, note], value_input_option="USER_ENTERED")
-    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | {type_} | {amount} | {category} | {place}")
-    return f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
+    transactions_sheet.append_row([date_text, type_, amount, category, place, note, invoice_number], value_input_option="USER_ENTERED")
+    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | {type_} | {amount} | {category} | {place} | Invoice: {invoice_number if invoice_number else 'N/A'}")
+    
+    response = f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
+    if invoice_number:
+        response += f"\n🧾 Invoice: {invoice_number}"
+    return response
 
 def add_transfer(from_place, to_place, amount, note=""):
     date_value = datetime.now(TIMEZONE)
@@ -197,11 +201,28 @@ def handle_message(event: MessageEvent):
         try:
             amount = int(parts[1])
         except:
-            return reply_text(event.reply_token, "❌ Format: e/i amount category place note(optional)")
+            return reply_text(event.reply_token, "❌ Format: e/i amount category place [note] [inv:NUMBER]")
+        
         category = (parts[2] if len(parts) > 2 else "Other").capitalize()
         place = (parts[3] if len(parts) > 3 else "Unknown").capitalize()
-        note = " ".join(parts[4:]) if len(parts) > 4 else ""
-        return reply_text(event.reply_token, add_transaction(type_, amount, category, place, note))
+        
+        # Parse note and invoice number
+        note_parts = []
+        invoice_number = ""
+        
+        for part in parts[4:]:
+            if part.lower().startswith("inv:"):
+                invoice_number = part[4:].upper()  # Extract invoice number after "inv:"
+            else:
+                note_parts.append(part)
+        
+        note = " ".join(note_parts)
+        
+        # Only add invoice for expenses
+        if type_ == "Expense":
+            return reply_text(event.reply_token, add_transaction(type_, amount, category, place, note, invoice_number))
+        else:
+            return reply_text(event.reply_token, add_transaction(type_, amount, category, place, note))
 
     # ---- Transfer ----
     elif cmd == "transfer" and len(parts) >= 4:
@@ -240,7 +261,7 @@ def handle_message(event: MessageEvent):
             "🤖 Finance Bot Commands:\n\n"
             "📌 Transactions:\n"
             "  i <amount> <category> <place> [note]\n"
-            "  e <amount> <category> <place> [note]\n\n"
+            "  e <amount> <category> <place> [note] [inv:NUMBER]\n\n"
             "📌 Transfers:\n"
             "  transfer <from> <to> <amount> [note]\n\n"
             "📌 Balances:\n"

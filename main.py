@@ -47,7 +47,9 @@ transactions_sheet = spreadsheet.worksheet("Transactions")
 balances_sheet = spreadsheet.worksheet("Balances")
 categories_sheet = spreadsheet.worksheet("Categories")
 transfers_sheet = spreadsheet.worksheet("Transfers")
-reports_sheet = spreadsheet.worksheet("Reports")
+monthly_recap_sheet = spreadsheet.worksheet("Monthly Recap")
+monthly_report_sheet = spreadsheet.worksheet("Monthly Report")
+budgeting_sheet = spreadsheet.worksheet("Budgeting")
 
 # LINE
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
@@ -146,34 +148,103 @@ def get_categories_report():
     
     return report
 
+def get_monthly_recap():
+    # Get detailed monthly recap from Monthly Recap sheet
+    values = monthly_recap_sheet.get_all_values()
+    
+    if len(values) < 5:
+        return "📅 No monthly recap available yet. Recap is generated on the 1st of each month."
+    
+    # Parse the recap sheet
+    report = ""
+    
+    # Find key sections
+    for i, row in enumerate(values):
+        if not row or not row[0]:
+            continue
+            
+        cell = str(row[0])
+        
+        # Title
+        if 'RECAP' in cell.upper() and i == 0:
+            report += f"📅 {cell}\n\n"
+        
+        # Financial Summary
+        elif cell == '💰 FINANCIAL SUMMARY':
+            report += "💰 Summary:\n"
+            j = i + 1
+            while j < len(values) and values[j][0] and '📊' not in str(values[j][0]) and '📉' not in str(values[j][0]):
+                if len(values[j]) >= 2:
+                    report += f"• {values[j][0]} {values[j][1]}\n"
+                j += 1
+            report += "\n"
+        
+        # Expense by Category
+        elif cell == '📉 EXPENSE BY CATEGORY':
+            report += "📉 Expense Breakdown:\n"
+            j = i + 2  # Skip header row
+            while j < len(values) and values[j][0] and '🔄' not in str(values[j][0]) and '💳' not in str(values[j][0]):
+                if len(values[j]) >= 3 and values[j][0] != 'TOTAL':
+                    cat = values[j][0]
+                    amt = values[j][1]
+                    trans = values[j][2]
+                    report += f"• {cat}: {amt} ({trans} transactions)\n"
+                j += 1
+            report += "\n"
+        
+        # Transfers
+        elif cell == '🔄 TRANSFERS':
+            j = i + 2  # Skip header
+            transfer_lines = []
+            total_line = ""
+            while j < len(values) and values[j][0] and '💳' not in str(values[j][0]) and '🧾' not in str(values[j][0]):
+                if 'TOTAL' in str(values[j][0]):
+                    total_line = f"🔄 Transfers: {values[j][2]}"
+                j += 1
+            if total_line:
+                report += total_line + "\n\n"
+        
+        # Balances
+        elif cell == '💳 BALANCES':
+            j = i + 2  # Skip header
+            while j < len(values) and values[j][0] and '🧾' not in str(values[j][0]) and '📋' not in str(values[j][0]):
+                if 'TOTAL' in str(values[j][0]) and len(values[j]) >= 3:
+                    report += f"💳 Balance: {values[j][1]} → {values[j][2]}\n\n"
+                    break
+                j += 1
+        
+        # Invoices
+        elif cell == '🧾 INVOICES':
+            j = i + 1
+            invoice_info = []
+            while j < len(values) and values[j][0] and '📋' not in str(values[j][0]):
+                if len(values[j]) >= 2:
+                    invoice_info.append(f"{values[j][0]} {values[j][1]}")
+                j += 1
+            if invoice_info:
+                report += "🧾 Invoices: " + ", ".join(invoice_info) + "\n\n"
+    
+    report += "📋 See full details in 'Monthly Recap' sheet"
+    
+    return report
+
 def get_report(year, month):
-    values = reports_sheet.get_all_values()
+    # Get simple monthly report from Monthly Report sheet
+    values = monthly_report_sheet.get_all_values()
+    
     if len(values) <= 1:
         return f"📅 No report found for {year}-{month:02d}"
     
-    header = values[0]  # Month | Income | Expense | Net | Category1 | Amount1 | Category2 | Amount2 | Category3 | Amount3
-    rows = values[1:]
-    
     target_month = f"{year}-{month:02d}"
     
-    for row in rows:
-        if len(row) < 1:
-            continue
-        if row[0] == target_month:
-            report = f"📅 Report for {target_month}\n\n"
-            report += f"📈 Income: NT${row[1]}\n"
-            report += f"📉 Expense: NT${row[2]}\n"
-            report += f"💵 Net: NT${row[3]}\n"
-            
-            if len(row) > 4 and row[4]:
-                report += f"\n🔥 Top Expenses:\n"
-                for i in range(4, min(len(row), 10), 2):
-                    if i+1 < len(row) and row[i]:
-                        report += f"  • {row[i]}: NT${row[i+1]}\n"
-            
-            return report
+    for row in values[1:]:  # Skip header
+        if len(row) >= 3 and row[0] == target_month:
+            income = row[1]
+            expense = row[2]
+            return f"📅 Report for {target_month}\n\n💰 Income: NT${income}\n📉 Expense: NT${expense}"
     
     return f"📅 No report found for {target_month}"
+
 
 # ===== LINE CALLBACK =====
 @app.post("/callback")
@@ -246,14 +317,18 @@ def handle_message(event: MessageEvent):
     # ---- Report ----
     elif cmd == "report":
         today = datetime.now(TIMEZONE)
-        if len(parts) == 2 and "-" in parts[1]:
+        
+        # Check if user wants specific month or current recap
+        if len(parts) >= 2 and "-" in parts[1]:
+            # Historical report: report 2024-09
             try:
                 year, month = map(int, parts[1].split("-"))
             except:
                 year, month = today.year, today.month
+            return reply_text(event.reply_token, get_report(year, month))
         else:
-            year, month = today.year, today.month
-        return reply_text(event.reply_token, get_report(year, month))
+            # Current monthly recap (default)
+            return reply_text(event.reply_token, get_monthly_recap())
 
     # ---- Help ----
     elif cmd == "help":
@@ -269,7 +344,8 @@ def handle_message(event: MessageEvent):
             "  setbalance <place> <amount>\n\n"
             "📌 Reports:\n"
             "  categories\n"
-            "  report [YYYY-MM]\n\n"
+            "  report (shows current monthly recap)\n"
+            "  report YYYY-MM (shows historical month)\n\n"
             "📌 Other:\n"
             "  help"
         )
@@ -293,6 +369,47 @@ def reply_text(reply_token: str, message: str):
 @app.get("/health")
 def health():
     return "OK"
+
+# @app.get("/liff/scanner")
+# def liff_scanner():
+#     # Read the LIFF HTML file
+#     with open('liff_scanner.html', 'r', encoding='utf-8') as f:
+#         html_content = f.read()
+#     return html_content
+
+# @app.post("/api/invoice/save")
+# def save_invoice():
+#     try:
+#         data = request.json
+        
+#         # Extract data from LIFF
+#         user_id = data.get('userId')
+#         invoice_number = data.get('invoiceNumber')
+#         amount = data.get('amount')
+#         category = data.get('category')
+#         place = data.get('place')
+#         note = data.get('note', '')
+        
+#         # Save transaction
+#         result = add_transaction('Expense', amount, category, place, note, invoice_number)
+        
+#         # Send confirmation message via LINE
+#         with ApiClient(configuration) as api_client:
+#             api = MessagingApi(api_client)
+#             try:
+#                 api.push_message(
+#                     PushMessageRequest(
+#                         to=user_id,
+#                         messages=[TextMessage(text=result)]
+#                     )
+#                 )
+#             except:
+#                 pass  # If push fails, still return success
+        
+#         return jsonify({'success': True, 'message': result})
+    
+#     except Exception as e:
+#         return jsonify({'success': False, 'error': str(e)}), 400
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

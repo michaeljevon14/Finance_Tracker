@@ -5,11 +5,11 @@ from zoneinfo import ZoneInfo
 
 TIMEZONE = ZoneInfo("Asia/Taipei")
 
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
     MessagingApi, Configuration, ApiClient,
-    ReplyMessageRequest, TextMessage
+    ReplyMessageRequest, TextMessage, PushMessageRequest
 )
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
@@ -55,14 +55,81 @@ budgeting_sheet = spreadsheet.worksheet("Budgeting")
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
+# ===== CATEGORY MAPPING =====
+# Load category mapping from Budgeting sheet
+CATEGORY_MAPPING = {}
+
+def load_category_mapping():
+    """Load sub-category to main-category mapping from Budgeting sheet"""
+    global CATEGORY_MAPPING
+    try:
+        values = budgeting_sheet.get_all_values()
+        if len(values) <= 1:
+            print("Warning: Budgeting sheet is empty or only has headers")
+            return
+        
+        CATEGORY_MAPPING.clear()
+        
+        # Skip header row
+        for row in values[1:]:
+            if len(row) < 2:
+                continue
+            
+            main_category = row[0].strip()
+            sub_categories_str = row[1].strip()
+            
+            if not main_category or not sub_categories_str:
+                continue
+            
+            # Split by comma and clean up
+            sub_categories = [cat.strip().lower() for cat in sub_categories_str.split(',')]
+            
+            # Map each sub-category to main category
+            for sub_cat in sub_categories:
+                if sub_cat:
+                    CATEGORY_MAPPING[sub_cat] = main_category
+        
+        print(f"[{datetime.now().isoformat()}] Loaded category mapping: {CATEGORY_MAPPING}")
+    except Exception as e:
+        print(f"[{datetime.now().isoformat()}] Error loading category mapping: {e}")
+
+def get_main_category(sub_category):
+    """Get main category from sub-category using mapping"""
+    if not sub_category:
+        return "Other"
+    
+    sub_cat_lower = sub_category.lower().strip()
+    return CATEGORY_MAPPING.get(sub_cat_lower, "Other")
+
+# Load mapping on startup
+load_category_mapping()
+
 # ===== SHEET FUNCTIONS =====
 def add_transaction(type_, amount, category, place, note="", invoice_number=""):
+    """
+    Add transaction with auto-mapping to main category
+    Transactions structure: Date | Type | Amount | MainCategory | Category | Place | Note | Invoice
+    """
     date_value = datetime.now(TIMEZONE)
     date_text = date_value.strftime("%m/%d/%Y %H:%M:%S")
-    transactions_sheet.append_row([date_text, type_, amount, category, place, note, invoice_number], value_input_option="USER_ENTERED")
-    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | {type_} | {amount} | {category} | {place} | Invoice: {invoice_number if invoice_number else 'N/A'}")
     
-    response = f"✅ NT${amount:,} {type_} ({category}) {'to' if type_=='Income' else 'from'} {place} saved."
+    # Auto-detect main category
+    main_category = get_main_category(category)
+    
+    transactions_sheet.append_row([
+        date_text, 
+        type_, 
+        amount, 
+        main_category,  # Column D
+        category,       # Column E
+        place,          # Column F
+        note,           # Column G
+        invoice_number  # Column H
+    ], value_input_option="USER_ENTERED")
+    
+    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | {type_} | {amount} | {main_category} | {category} | {place} | Invoice: {invoice_number if invoice_number else 'N/A'}")
+    
+    response = f"✅ NT${amount:,} {type_} ({category} → {main_category}) {'to' if type_=='Income' else 'from'} {place} saved."
     if invoice_number:
         response += f"\n🧾 Invoice: {invoice_number}"
     return response
@@ -71,8 +138,8 @@ def add_transfer(from_place, to_place, amount, note=""):
     date_value = datetime.now(TIMEZONE)
     date_text = date_value.strftime("%m/%d/%Y %H:%M:%S")
     transfers_sheet.append_row([date_text, from_place, to_place, amount, note], value_input_option="USER_ENTERED")
-    print(f"[{datetime.now().isoformat()}] Appended transaction -> {date_text} | Transfer | {amount} |  | {from_place} | {to_place}")
-    return f"🔄 Transfer {amount} TWD from {from_place} to {to_place} saved."
+    print(f"[{datetime.now().isoformat()}] Appended transfer -> {date_text} | Transfer | {amount} | {from_place} -> {to_place}")
+    return f"🔄 Transfer NT${amount:,} from {from_place} to {to_place} saved."
 
 def set_balance(place, amount):
     values = balances_sheet.get_all_values()
@@ -104,7 +171,6 @@ def get_categories_report():
     if len(values) <= 1:
         return "📊 No categories found."
     
-    header = values[0]  # Category | Income | Expense | Net
     rows = values[1:]
     
     total_income = 0
@@ -149,7 +215,7 @@ def get_categories_report():
     return report
 
 def get_monthly_recap():
-    # Get detailed monthly recap from Monthly Recap sheet
+    """Get detailed monthly recap from Monthly Recap sheet"""
     values = monthly_recap_sheet.get_all_values()
     
     if len(values) < 5:
@@ -195,7 +261,6 @@ def get_monthly_recap():
         # Transfers
         elif cell == '🔄 TRANSFERS':
             j = i + 2  # Skip header
-            transfer_lines = []
             total_line = ""
             while j < len(values) and values[j][0] and '💳' not in str(values[j][0]) and '🧾' not in str(values[j][0]):
                 if 'TOTAL' in str(values[j][0]):
@@ -229,7 +294,7 @@ def get_monthly_recap():
     return report
 
 def get_report(year, month):
-    # Get simple monthly report from Monthly Report sheet
+    """Get simple monthly report from Monthly Report sheet"""
     values = monthly_report_sheet.get_all_values()
     
     if len(values) <= 1:
@@ -245,6 +310,10 @@ def get_report(year, month):
     
     return f"📅 No report found for {target_month}"
 
+def reload_mapping():
+    """Reload category mapping (useful for testing)"""
+    load_category_mapping()
+    return f"✅ Category mapping reloaded!\n{len(CATEGORY_MAPPING)} mappings loaded."
 
 # ===== LINE CALLBACK =====
 @app.post("/callback")
@@ -298,7 +367,10 @@ def handle_message(event: MessageEvent):
     # ---- Transfer ----
     elif cmd == "transfer" and len(parts) >= 4:
         from_place, to_place = parts[1].capitalize(), parts[2].capitalize()
-        amount = int(parts[3])
+        try:
+            amount = int(parts[3])
+        except:
+            return reply_text(event.reply_token, "❌ Format: transfer from to amount [note]")
         note = " ".join(parts[4:]) if len(parts) > 4 else ""
         return reply_text(event.reply_token, add_transfer(from_place, to_place, amount, note))
 
@@ -307,9 +379,12 @@ def handle_message(event: MessageEvent):
         return reply_text(event.reply_token, get_balance_report())
     elif cmd == "setbalance" and len(parts) == 3:
         place = parts[1].capitalize()
-        amount = int(parts[2])
+        try:
+            amount = int(parts[2])
+        except:
+            return reply_text(event.reply_token, "❌ Format: setbalance place amount")
         return reply_text(event.reply_token, set_balance(place, amount))
-    
+
     # ---- Categories ----
     elif cmd == "categories":
         return reply_text(event.reply_token, get_categories_report())
@@ -330,6 +405,10 @@ def handle_message(event: MessageEvent):
             # Current monthly recap (default)
             return reply_text(event.reply_token, get_monthly_recap())
 
+    # ---- Reload Mapping (for testing) ----
+    elif cmd == "reload":
+        return reply_text(event.reply_token, reload_mapping())
+
     # ---- Help ----
     elif cmd == "help":
         help_text = (
@@ -347,6 +426,7 @@ def handle_message(event: MessageEvent):
             "  report (shows current monthly recap)\n"
             "  report YYYY-MM (shows historical month)\n\n"
             "📌 Other:\n"
+            "  reload (refresh category mapping)\n"
             "  help"
         )
         return reply_text(event.reply_token, help_text)
@@ -370,46 +450,49 @@ def reply_text(reply_token: str, message: str):
 def health():
     return "OK"
 
-# @app.get("/liff/scanner")
-# def liff_scanner():
-#     # Read the LIFF HTML file
-#     with open('liff_scanner.html', 'r', encoding='utf-8') as f:
-#         html_content = f.read()
-#     return html_content
+@app.get("/liff/scanner")
+def liff_scanner():
+    # Read the LIFF HTML file
+    try:
+        with open('liff_scanner.html', 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        return html_content
+    except:
+        return "LIFF scanner not configured yet", 404
 
-# @app.post("/api/invoice/save")
-# def save_invoice():
-#     try:
-#         data = request.json
+@app.post("/api/invoice/save")
+def save_invoice():
+    try:
+        data = request.json
         
-#         # Extract data from LIFF
-#         user_id = data.get('userId')
-#         invoice_number = data.get('invoiceNumber')
-#         amount = data.get('amount')
-#         category = data.get('category')
-#         place = data.get('place')
-#         note = data.get('note', '')
+        # Extract data from LIFF
+        user_id = data.get('userId')
+        invoice_number = data.get('invoiceNumber')
+        amount = data.get('amount')
+        category = data.get('category')
+        place = data.get('place')
+        note = data.get('note', '')
         
-#         # Save transaction
-#         result = add_transaction('Expense', amount, category, place, note, invoice_number)
+        # Save transaction
+        result = add_transaction('Expense', amount, category, place, note, invoice_number)
         
-#         # Send confirmation message via LINE
-#         with ApiClient(configuration) as api_client:
-#             api = MessagingApi(api_client)
-#             try:
-#                 api.push_message(
-#                     PushMessageRequest(
-#                         to=user_id,
-#                         messages=[TextMessage(text=result)]
-#                     )
-#                 )
-#             except:
-#                 pass  # If push fails, still return success
+        # Send confirmation message via LINE
+        with ApiClient(configuration) as api_client:
+            api = MessagingApi(api_client)
+            try:
+                api.push_message(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=result)]
+                    )
+                )
+            except:
+                pass  # If push fails, still return success
         
-#         return jsonify({'success': True, 'message': result})
+        return jsonify({'success': True, 'message': result})
     
-#     except Exception as e:
-#         return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
